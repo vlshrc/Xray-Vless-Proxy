@@ -11,8 +11,8 @@ import AdmZip from "adm-zip";
 import { logger } from "./lib/logger";
 import path from "node:path";
 
-const DATA_DIR = path.join(process.cwd(), "xray-data");
-const UUID_FILE = path.join(DATA_DIR, "uuid");
+const DATA_DIR = "/tmp/xray-data";
+const UUID_FILE = path.join(process.cwd(), "xray-data", "uuid");
 const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 const XRAY_BIN = path.join(DATA_DIR, "xray");
 export const XRAY_INTERNAL_PORT = 10808;
@@ -56,19 +56,32 @@ async function getLatestXrayAssetUrl(): Promise<string> {
   return asset.browser_download_url;
 }
 
-function getOrCreateUUID(): string {
+function getUUID(): string {
+  if (process.env["VLESS_UUID"]) {
+    const uuid = process.env["VLESS_UUID"].trim();
+    logger.info({ uuid }, "Using VLESS_UUID from environment");
+    return uuid;
+  }
   if (existsSync(UUID_FILE)) {
     const uuid = readFileSync(UUID_FILE, "utf-8").trim();
-    logger.info({ uuid }, "Loaded existing VLESS UUID");
+    logger.info({ uuid }, "Loaded existing VLESS UUID from file");
     return uuid;
   }
   const uuid = randomUUID();
+  mkdirSync(path.dirname(UUID_FILE), { recursive: true });
   writeFileSync(UUID_FILE, uuid, "utf-8");
-  logger.info({ uuid }, "Generated new VLESS UUID");
+  logger.warn(
+    { uuid },
+    "VLESS_UUID env var not set — generated new UUID (set VLESS_UUID env var to keep it stable across restarts)",
+  );
   return uuid;
 }
 
 function getHost(): string {
+  if (process.env["REPLIT_DOMAINS"]) {
+    const first = process.env["REPLIT_DOMAINS"].split(",")[0]!.trim();
+    return first;
+  }
   if (process.env["REPLIT_DEV_DOMAIN"]) {
     return process.env["REPLIT_DEV_DOMAIN"];
   }
@@ -103,7 +116,7 @@ function writeXrayConfig(uuid: string): void {
 
 async function ensureXrayBinary(): Promise<void> {
   if (existsSync(XRAY_BIN)) {
-    logger.info("xray binary already present, skipping download");
+    logger.info("xray binary already present in /tmp, skipping download");
     return;
   }
 
@@ -116,10 +129,7 @@ async function ensureXrayBinary(): Promise<void> {
 
   const zip = new AdmZip(zipPath);
   const entries = zip.getEntries();
-  logger.info(
-    { files: entries.map((e) => e.entryName) },
-    "Zip contents",
-  );
+  logger.info({ files: entries.map((e) => e.entryName) }, "Zip contents");
 
   const xrayEntry = entries.find(
     (e) => e.entryName === "xray" || e.entryName.endsWith("/xray"),
@@ -134,9 +144,7 @@ async function ensureXrayBinary(): Promise<void> {
   zip.extractEntryTo(xrayEntry, DATA_DIR, false, true);
 
   if (!existsSync(XRAY_BIN)) {
-    throw new Error(
-      `xray binary not found at ${XRAY_BIN} after extraction.`,
-    );
+    throw new Error(`xray binary not found at ${XRAY_BIN} after extraction.`);
   }
 
   chmodSync(XRAY_BIN, 0o755);
@@ -148,7 +156,7 @@ export async function startXray(): Promise<void> {
 
   await ensureXrayBinary();
 
-  const uuid = getOrCreateUUID();
+  const uuid = getUUID();
   writeXrayConfig(uuid);
 
   const xray = spawn(XRAY_BIN, ["run", "-config", CONFIG_FILE], {
