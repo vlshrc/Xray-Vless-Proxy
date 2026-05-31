@@ -1,0 +1,7 @@
+node_modules/
+.env
+xray
+xray-linux-64
+cloudflared
+*.zip
+/tmp/
