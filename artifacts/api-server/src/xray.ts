@@ -1,4 +1,4 @@
-import { execSync, spawn } from "node:child_process";
+import { execSync, spawn, type ChildProcess } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import AdmZip from "adm-zip";
 import { logger } from "./lib/logger";
 import path from "node:path";
+import { getServerSettings } from "./settings";
 
 const DATA_DIR = "/tmp/xray-data";
 const UUID_FILE = path.join(process.cwd(), "xray-data", "uuid");
@@ -31,6 +32,8 @@ interface GithubRelease {
   tag_name: string;
   assets: GithubAsset[];
 }
+
+let xrayProcess: ChildProcess | null = null;
 
 async function getLatestXrayAssetUrl(): Promise<string> {
   logger.info("Fetching latest xray-core release info from GitHub...");
@@ -103,7 +106,51 @@ export function getHost(): string {
   return "localhost";
 }
 
+function buildRoutingRules(): object[] {
+  const srv = getServerSettings("replit-main");
+  const routing = srv?.routing ?? {
+    ruDirect: true,
+    adBlocking: true,
+    privateDirect: true,
+  };
+
+  const rules: object[] = [];
+
+  if (routing.adBlocking) {
+    rules.push({
+      type: "field",
+      domain: ["geosite:category-ads-all"],
+      outboundTag: "blocked",
+    });
+  }
+
+  if (routing.privateDirect) {
+    rules.push({
+      type: "field",
+      domain: ["geosite:private"],
+      outboundTag: "direct",
+    });
+  }
+
+  const directIPs: string[] = [];
+  if (routing.privateDirect) directIPs.push("geoip:private");
+  if (routing.ruDirect) directIPs.push("geoip:ru");
+
+  if (directIPs.length > 0) {
+    rules.push({
+      type: "field",
+      ip: directIPs,
+      outboundTag: "direct",
+    });
+  }
+
+  return rules;
+}
+
 function writeXrayConfig(users: XrayUser[]): void {
+  const srv = getServerSettings("replit-main");
+  const wsPath = srv?.transport?.wsPath ?? "/ws";
+
   const config = {
     log: { loglevel: "warning" },
     inbounds: [
@@ -121,7 +168,7 @@ function writeXrayConfig(users: XrayUser[]): void {
         },
         streamSettings: {
           network: "ws",
-          wsSettings: { path: "/ws" },
+          wsSettings: { path: wsPath },
         },
       },
     ],
@@ -131,23 +178,7 @@ function writeXrayConfig(users: XrayUser[]): void {
     ],
     routing: {
       domainStrategy: "IPIfNonMatch",
-      rules: [
-        {
-          type: "field",
-          domain: ["geosite:category-ads-all"],
-          outboundTag: "blocked",
-        },
-        {
-          type: "field",
-          domain: ["geosite:private"],
-          outboundTag: "direct",
-        },
-        {
-          type: "field",
-          ip: ["geoip:ru", "geoip:private"],
-          outboundTag: "direct",
-        },
-      ],
+      rules: buildRoutingRules(),
     },
   };
   writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
@@ -195,32 +226,64 @@ async function ensureXrayBinary(): Promise<void> {
   logger.info("xray-core ready");
 }
 
+function spawnXray(): void {
+  const users = getUsers();
+  writeXrayConfig(users);
+
+  const proc = spawn(XRAY_BIN, ["run", "-config", CONFIG_FILE], {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, XRAY_LOCATION_ASSET: DATA_DIR },
+  });
+
+  xrayProcess = proc;
+
+  proc.stdout.on("data", (d: Buffer) => {
+    const line = d.toString().trim();
+    if (line) logger.info(`[xray] ${line}`);
+  });
+  proc.stderr.on("data", (d: Buffer) => {
+    const line = d.toString().trim();
+    if (line) logger.warn(`[xray] ${line}`);
+  });
+  proc.on("exit", (code) => {
+    if (xrayProcess === proc) {
+      logger.error({ code }, "xray process exited unexpectedly");
+      xrayProcess = null;
+    }
+  });
+}
+
+export async function reloadXray(): Promise<void> {
+  logger.info("Reloading xray with updated config...");
+
+  if (xrayProcess) {
+    xrayProcess.kill("SIGTERM");
+    await new Promise<void>((resolve) => {
+      const timeout = setTimeout(() => {
+        xrayProcess?.kill("SIGKILL");
+        resolve();
+      }, 3000);
+      xrayProcess!.once("exit", () => {
+        clearTimeout(timeout);
+        resolve();
+      });
+    });
+    xrayProcess = null;
+  }
+
+  spawnXray();
+  logger.info("xray reloaded");
+}
+
 export async function startXray(): Promise<void> {
   mkdirSync(DATA_DIR, { recursive: true });
 
   await ensureXrayBinary();
 
-  const users = getUsers();
-  writeXrayConfig(users);
-
-  const xray = spawn(XRAY_BIN, ["run", "-config", CONFIG_FILE], {
-    stdio: ["ignore", "pipe", "pipe"],
-    env: { ...process.env, XRAY_LOCATION_ASSET: DATA_DIR },
-  });
-
-  xray.stdout.on("data", (d: Buffer) => {
-    const line = d.toString().trim();
-    if (line) logger.info(`[xray] ${line}`);
-  });
-  xray.stderr.on("data", (d: Buffer) => {
-    const line = d.toString().trim();
-    if (line) logger.warn(`[xray] ${line}`);
-  });
-  xray.on("exit", (code) => {
-    logger.error({ code }, "xray process exited unexpectedly");
-  });
+  spawnXray();
 
   const host = getHost();
+  const users = getUsers();
 
   console.log("");
   console.log("╔══════════════════════════════════════════════════════════════╗");
