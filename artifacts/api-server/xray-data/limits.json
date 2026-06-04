@@ -1,0 +1,29 @@
+{
+  "users": [
+    {
+      "uuid": "69aba3bf-d0b0-4476-8178-5e9ddea03df8",
+      "label": "Пользователь 1",
+      "enabled": true,
+      "monthlyGbLimit": null,
+      "speedMbps": null,
+      "resetDay": 1
+    },
+    {
+      "uuid": "6bbe4967-9c7f-4d33-9ee4-ebb93af4ba72",
+      "label": "Пользователь 2",
+      "enabled": true,
+      "monthlyGbLimit": null,
+      "speedMbps": null,
+      "resetDay": 1
+    },
+    {
+      "uuid": "85ae49f1-7922-4151-940a-26c6a7e8128b",
+      "label": "Пользователь 3",
+      "enabled": true,
+      "monthlyGbLimit": null,
+      "speedMbps": null,
+      "resetDay": 1
+    }
+  ],
+  "usage": []
+}
