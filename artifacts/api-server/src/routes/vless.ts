@@ -1,26 +1,39 @@
 import { Router, type IRouter } from "express";
+import { getUsers, getHost } from "../xray";
+import { trafficStats } from "../index";
 
 const router: IRouter = Router();
 
-function getHost(): string {
-  if (process.env["REPLIT_DOMAINS"]) {
-    return process.env["REPLIT_DOMAINS"].split(",")[0]!.trim();
-  }
-  if (process.env["REPLIT_DEV_DOMAIN"]) {
-    return process.env["REPLIT_DEV_DOMAIN"];
-  }
-  if (process.env["REPL_SLUG"] && process.env["REPL_OWNER"]) {
-    return `${process.env["REPL_SLUG"]}.${process.env["REPL_OWNER"]}.repl.co`;
-  }
-  return "localhost";
-}
-
 router.get("/vless-info", (_req, res) => {
-  const uuid = process.env["VLESS_UUID"] ?? "not-configured";
+  const users = getUsers();
   const host = getHost();
-  const vlessLink = `vless://${uuid}@${host}:443?encryption=none&security=tls&type=ws&path=%2Fws#Replit-Proxy`;
 
-  res.json({ uuid, host, port: 443, path: "/ws", vlessLink });
+  const userLinks = users.map((u) => ({
+    label: u.label,
+    uuid: u.uuid,
+    vlessLink: `vless://${u.uuid}@${host}:443?encryption=none&security=tls&type=ws&path=%2Fws#${encodeURIComponent(u.label)}`,
+  }));
+
+  const uptimeSeconds = Math.floor((Date.now() - trafficStats.startTime) / 1000);
+
+  res.json({
+    host,
+    port: 443,
+    path: "/ws",
+    users: userLinks,
+    features: {
+      geoRouting: true,
+      adBlocking: true,
+      ruDirect: true,
+    },
+    stats: {
+      totalConnections: trafficStats.totalConnections,
+      activeConnections: trafficStats.activeConnections,
+      bytesIn: trafficStats.bytesIn,
+      bytesOut: trafficStats.bytesOut,
+      uptimeSeconds,
+    },
+  });
 });
 
 export default router;

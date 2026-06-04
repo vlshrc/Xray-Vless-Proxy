@@ -35,3 +35,5 @@ externalPort = 3000
 
 [userenv.shared]
 VLESS_UUID = "69aba3bf-d0b0-4476-8178-5e9ddea03df8"
+VLESS_UUID_2 = "6bbe4967-9c7f-4d33-9ee4-ebb93af4ba72"
+VLESS_UUID_3 = "85ae49f1-7922-4151-940a-26c6a7e8128b"

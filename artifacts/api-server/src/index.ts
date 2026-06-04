@@ -18,6 +18,14 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
+export const trafficStats = {
+  totalConnections: 0,
+  activeConnections: 0,
+  bytesIn: 0,
+  bytesOut: 0,
+  startTime: Date.now(),
+};
+
 const server = http.createServer(app);
 
 const wsProxy = httpProxy.createProxyServer({
@@ -36,7 +44,25 @@ wsProxy.on("error", (err, _req, res) => {
 
 server.on("upgrade", (req, socket, head) => {
   if (req.url === "/ws") {
-    logger.info("Upgrading WebSocket connection → xray");
+    trafficStats.totalConnections++;
+    trafficStats.activeConnections++;
+
+    socket.on("data", (chunk: Buffer) => {
+      trafficStats.bytesIn += chunk.length;
+    });
+
+    const origWrite = socket.write.bind(socket);
+    socket.write = (chunk: Buffer | string, ...args: unknown[]) => {
+      if (Buffer.isBuffer(chunk)) trafficStats.bytesOut += chunk.length;
+      else if (typeof chunk === "string") trafficStats.bytesOut += Buffer.byteLength(chunk);
+      return (origWrite as (...a: unknown[]) => boolean)(chunk, ...args);
+    };
+
+    socket.on("close", () => {
+      trafficStats.activeConnections = Math.max(0, trafficStats.activeConnections - 1);
+    });
+
+    logger.info("WebSocket connection → xray");
     wsProxy.ws(req, socket, head);
   } else {
     socket.destroy();

@@ -17,6 +17,11 @@ const CONFIG_FILE = path.join(DATA_DIR, "config.json");
 const XRAY_BIN = path.join(DATA_DIR, "xray");
 export const XRAY_INTERNAL_PORT = 10808;
 
+export interface XrayUser {
+  label: string;
+  uuid: string;
+}
+
 interface GithubAsset {
   name: string;
   browser_download_url: string;
@@ -56,31 +61,38 @@ async function getLatestXrayAssetUrl(): Promise<string> {
   return asset.browser_download_url;
 }
 
-function getUUID(): string {
+function getOrCreatePrimaryUUID(): string {
   if (process.env["VLESS_UUID"]) {
-    const uuid = process.env["VLESS_UUID"].trim();
-    logger.info({ uuid }, "Using VLESS_UUID from environment");
-    return uuid;
+    return process.env["VLESS_UUID"].trim();
   }
   if (existsSync(UUID_FILE)) {
-    const uuid = readFileSync(UUID_FILE, "utf-8").trim();
-    logger.info({ uuid }, "Loaded existing VLESS UUID from file");
-    return uuid;
+    return readFileSync(UUID_FILE, "utf-8").trim();
   }
   const uuid = randomUUID();
   mkdirSync(path.dirname(UUID_FILE), { recursive: true });
   writeFileSync(UUID_FILE, uuid, "utf-8");
-  logger.warn(
-    { uuid },
-    "VLESS_UUID env var not set — generated new UUID (set VLESS_UUID env var to keep it stable across restarts)",
-  );
+  logger.warn({ uuid }, "VLESS_UUID not set — generated fallback UUID");
   return uuid;
 }
 
-function getHost(): string {
+export function getUsers(): XrayUser[] {
+  const users: XrayUser[] = [];
+
+  const primary = getOrCreatePrimaryUUID();
+  users.push({ label: "Пользователь 1", uuid: primary });
+
+  const uuid2 = process.env["VLESS_UUID_2"]?.trim();
+  if (uuid2) users.push({ label: "Пользователь 2", uuid: uuid2 });
+
+  const uuid3 = process.env["VLESS_UUID_3"]?.trim();
+  if (uuid3) users.push({ label: "Пользователь 3", uuid: uuid3 });
+
+  return users;
+}
+
+export function getHost(): string {
   if (process.env["REPLIT_DOMAINS"]) {
-    const first = process.env["REPLIT_DOMAINS"].split(",")[0]!.trim();
-    return first;
+    return process.env["REPLIT_DOMAINS"].split(",")[0]!.trim();
   }
   if (process.env["REPLIT_DEV_DOMAIN"]) {
     return process.env["REPLIT_DEV_DOMAIN"];
@@ -91,7 +103,7 @@ function getHost(): string {
   return "localhost";
 }
 
-function writeXrayConfig(uuid: string): void {
+function writeXrayConfig(users: XrayUser[]): void {
   const config = {
     log: { loglevel: "warning" },
     inbounds: [
@@ -100,7 +112,11 @@ function writeXrayConfig(uuid: string): void {
         listen: "127.0.0.1",
         protocol: "vless",
         settings: {
-          clients: [{ id: uuid, level: 0 }],
+          clients: users.map((u, i) => ({
+            id: u.uuid,
+            level: 0,
+            email: `user${i + 1}@proxy`,
+          })),
           decryption: "none",
         },
         streamSettings: {
@@ -109,18 +125,45 @@ function writeXrayConfig(uuid: string): void {
         },
       },
     ],
-    outbounds: [{ protocol: "freedom", settings: {} }],
+    outbounds: [
+      { protocol: "freedom", settings: {}, tag: "direct" },
+      { protocol: "blackhole", settings: {}, tag: "blocked" },
+    ],
+    routing: {
+      domainStrategy: "IPIfNonMatch",
+      rules: [
+        {
+          type: "field",
+          domain: ["geosite:category-ads-all"],
+          outboundTag: "blocked",
+        },
+        {
+          type: "field",
+          domain: ["geosite:private"],
+          outboundTag: "direct",
+        },
+        {
+          type: "field",
+          ip: ["geoip:ru", "geoip:private"],
+          outboundTag: "direct",
+        },
+      ],
+    },
   };
   writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2), "utf-8");
 }
 
 async function ensureXrayBinary(): Promise<void> {
-  if (existsSync(XRAY_BIN)) {
-    logger.info("xray binary already present in /tmp, skipping download");
+  const geoipPath = path.join(DATA_DIR, "geoip.dat");
+  const geositePath = path.join(DATA_DIR, "geosite.dat");
+  const needsGeoFiles = !existsSync(geoipPath) || !existsSync(geositePath);
+
+  if (existsSync(XRAY_BIN) && !needsGeoFiles) {
+    logger.info("xray binary and geo files present, skipping download");
     return;
   }
 
-  logger.info("Downloading xray-core binary...");
+  logger.info("Downloading xray-core binary and geo data files...");
   const url = await getLatestXrayAssetUrl();
   const zipPath = path.join(DATA_DIR, "xray.zip");
 
@@ -131,24 +174,25 @@ async function ensureXrayBinary(): Promise<void> {
   const entries = zip.getEntries();
   logger.info({ files: entries.map((e) => e.entryName) }, "Zip contents");
 
-  const xrayEntry = entries.find(
-    (e) => e.entryName === "xray" || e.entryName.endsWith("/xray"),
-  );
-
-  if (!xrayEntry) {
-    throw new Error(
-      `No 'xray' binary found in zip. Files: ${entries.map((e) => e.entryName).join(", ")}`,
+  const wanted = ["xray", "geoip.dat", "geosite.dat"];
+  for (const name of wanted) {
+    const entry = entries.find(
+      (e) => e.entryName === name || e.entryName.endsWith(`/${name}`),
     );
+    if (entry) {
+      zip.extractEntryTo(entry, DATA_DIR, false, true);
+      logger.info({ file: name }, "Extracted");
+    } else {
+      logger.warn({ file: name }, "Not found in zip");
+    }
   }
-
-  zip.extractEntryTo(xrayEntry, DATA_DIR, false, true);
 
   if (!existsSync(XRAY_BIN)) {
     throw new Error(`xray binary not found at ${XRAY_BIN} after extraction.`);
   }
 
   chmodSync(XRAY_BIN, 0o755);
-  logger.info("xray-core binary ready");
+  logger.info("xray-core ready");
 }
 
 export async function startXray(): Promise<void> {
@@ -156,11 +200,12 @@ export async function startXray(): Promise<void> {
 
   await ensureXrayBinary();
 
-  const uuid = getUUID();
-  writeXrayConfig(uuid);
+  const users = getUsers();
+  writeXrayConfig(users);
 
   const xray = spawn(XRAY_BIN, ["run", "-config", CONFIG_FILE], {
     stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, XRAY_LOCATION_ASSET: DATA_DIR },
   });
 
   xray.stdout.on("data", (d: Buffer) => {
@@ -176,21 +221,19 @@ export async function startXray(): Promise<void> {
   });
 
   const host = getHost();
-  const vlessLink = `vless://${uuid}@${host}:443?encryption=none&security=tls&type=ws&path=%2Fws#Replit-Proxy`;
 
   console.log("");
   console.log("╔══════════════════════════════════════════════════════════════╗");
-  console.log("║          VLESS CONNECTION STRING FOR V2RayNG                 ║");
+  console.log("║       VLESS PROXY — CONNECTION STRINGS                       ║");
   console.log("╠══════════════════════════════════════════════════════════════╣");
-  console.log("║");
-  console.log(`  ${vlessLink}`);
-  console.log("║");
+  for (const user of users) {
+    const link = `vless://${user.uuid}@${host}:443?encryption=none&security=tls&type=ws&path=%2Fws#${encodeURIComponent(user.label)}`;
+    console.log(`║ ${user.label}:`);
+    console.log(`  ${link}`);
+  }
   console.log("╚══════════════════════════════════════════════════════════════╝");
   console.log("");
-  console.log(`Host:      ${host}`);
-  console.log(`Port:      443`);
-  console.log(`UUID:      ${uuid}`);
-  console.log(`Transport: WebSocket  Path: /ws`);
-  console.log(`Security:  TLS (handled by Replit)`);
+  console.log(`Routing:  🇷🇺 RU → direct | 🌍 Global → proxy | 🚫 Ads → blocked`);
+  console.log(`Users:    ${users.length} configured`);
   console.log("");
 }
