@@ -4,6 +4,7 @@ import app from "./app";
 import { logger } from "./lib/logger";
 import { startXray, XRAY_INTERNAL_PORT, getUsers, reloadXray } from "./xray";
 import { getExceededUsers, ensureUserLimits } from "./limits";
+import { initBot } from "./routes/bot";
 
 const rawPort = process.env["PORT"];
 if (!rawPort) throw new Error("PORT environment variable is required but was not provided.");
@@ -44,7 +45,6 @@ server.on("upgrade", (req, socket, head) => {
       return (origWrite as (...a: unknown[]) => boolean)(chunk, ...args);
     };
     socket.on("close", () => { trafficStats.activeConnections = Math.max(0, trafficStats.activeConnections - 1); });
-    logger.info("WebSocket connection → xray");
     wsProxy.ws(req, socket, head);
   } else {
     socket.destroy();
@@ -53,22 +53,22 @@ server.on("upgrade", (req, socket, head) => {
 
 server.listen(port, () => { logger.info({ port }, "Server listening"); });
 
+// Init Telegram bot
+initBot();
+
 startXray().then(() => {
   const users = getUsers();
   for (const u of users) ensureUserLimits(u.uuid, u.label);
 
+  // Limit enforcement every minute
   setInterval(async () => {
     try {
       const exceeded = getExceededUsers();
-      const prev = getExceededUsers();
-      if (JSON.stringify(exceeded.sort()) !== JSON.stringify(prev.sort())) {
-        logger.info({ exceeded }, "Limit check: reloading xray");
-        await reloadXray(exceeded);
-      }
+      await reloadXray(exceeded);
     } catch (err) {
       logger.error({ err }, "Limit check failed");
     }
   }, 60_000);
 }).catch((err) => {
-  logger.error({ err }, "Failed to start xray — proxy will not be available");
+  logger.error({ err }, "Failed to start xray");
 });
